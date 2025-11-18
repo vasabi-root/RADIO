@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 
 from .resize_transform import ResizeTransform
-from radio.utils import get_rank, get_world_size, barrier, rank_gate
+from RADIO.radio.utils import get_rank, get_world_size, barrier, rank_gate
 
 def round_up(value, multiple: int):
     return int(math.ceil(value / multiple))

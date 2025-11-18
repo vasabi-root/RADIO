@@ -17,14 +17,14 @@ from torch.hub import load_state_dict_from_url
 
 from timm.models import clean_state_dict
 
-from radio.adaptor_registry import adaptor_registry
-from radio.common import DEFAULT_VERSION, RadioResource, RESOURCE_MAP
-from radio.enable_damp import configure_damp_from_args
-from radio.enable_spectral_reparam import disable_spectral_reparam, configure_spectral_reparam_from_args
-from radio.feature_normalizer import FeatureNormalizer, IntermediateFeatureNormalizer
-from radio.radio_model import RADIOModel, create_model_from_args
-from radio.input_conditioner import get_default_conditioner
-from radio.vitdet import apply_vitdet_arch, VitDetArgs
+from RADIO.radio.adaptor_registry import adaptor_registry
+from RADIO.radio.common import DEFAULT_VERSION, RadioResource, RESOURCE_MAP
+from RADIO.radio.enable_damp import configure_damp_from_args
+from RADIO.radio.enable_spectral_reparam import disable_spectral_reparam, configure_spectral_reparam_from_args
+from RADIO.radio.feature_normalizer import FeatureNormalizer, IntermediateFeatureNormalizer
+from RADIO.radio.radio_model import RADIOModel, create_model_from_args
+from RADIO.radio.input_conditioner import get_default_conditioner
+from RADIO.radio.vitdet import apply_vitdet_arch, VitDetArgs
 
 
 def radio_model(

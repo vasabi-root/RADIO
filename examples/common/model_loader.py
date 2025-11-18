@@ -10,10 +10,10 @@ from torch.nn import functional as F
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
 
-from common.utils import rank_gate
-from radio.adaptor_base import RadioOutput
-from radio.input_conditioner import InputConditioner
-from radio.siglip2_adaptor import SigLIP2WrappedTokenizer
+from RADIO.examples.common.utils import rank_gate
+from RADIO.radio.adaptor_base import RadioOutput
+from RADIO.radio.input_conditioner import InputConditioner
+from RADIO.radio.siglip2_adaptor import SigLIP2WrappedTokenizer
 
 
 def dv2_sdpa(self, x: torch.Tensor) -> torch.Tensor:
@@ -349,7 +349,7 @@ def load_model(version: str, adaptor_names: str = None, use_huggingface: bool = 
             )
             model: nn.Module = AutoModel.from_pretrained(hf_repo, config=config, trust_remote_code=True, **kwargs)
         elif use_local_lib:
-            from hubconf import radio_model
+            from RADIO.hubconf import radio_model
             model, chk = radio_model(version=version, progress=True, adaptor_names=adaptor_names, return_checkpoint=True, **kwargs)
         else:
             model, chk = torch.hub.load(torchhub_repo, 'radio_model', version=version, progress=True,

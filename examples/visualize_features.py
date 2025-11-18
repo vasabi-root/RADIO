@@ -31,8 +31,8 @@ from einops import rearrange
 from datasets import load_dataset_builder, load_dataset
 from datasets.distributed import split_dataset_by_node
 
-from common import rank_print, load_model, get_standard_transform, collate
-from radio.input_conditioner import InputConditioner
+from RADIO.examples.common import rank_print, load_model, get_standard_transform, collate
+from RADIO.radio.input_conditioner import InputConditioner
 
 try:
     import wandb
@@ -66,7 +66,7 @@ def main(rank: int = 0, world_size: int = 1):
 
     device = torch.device('cuda', local_rank)
     parser = argparse.ArgumentParser(description='Compute SSL embedding rank estimates')
-    parser.add_argument('-v', '--model-version', default='radio_v2',
+    parser.add_argument('-v', '--model-version', default='c-radio_v3-h',
                         help='Which radio model to load.'
     )
     parser.add_argument('-d', '--dataset', default='imagenet-1k',
@@ -86,7 +86,7 @@ def main(rank: int = 0, world_size: int = 1):
     parser.add_argument('--max-dim', default=False, action='store_true', help='Resize the max dimension to the specified resolution')
     parser.add_argument('--resize-multiple', type=int, default=None,
                         help='Resize images with dimensions a multiple of this value.'
-                             ' This should be equal to the patch size of a ViT (e.g. RADIOv1)'
+                             ' This should be equal to thedataset patch size of a ViT (e.g. RADIOv1)'
     )
     parser.add_argument('--batch-size', type=int, default=16,
                         help='The batch size. If the input is variable sized, then this argument becomes a maximum.'
