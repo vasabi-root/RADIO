@@ -11,6 +11,7 @@ from functools import partial
 import gc
 import math
 import os
+from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import random
 from tqdm import tqdm
@@ -31,6 +32,15 @@ from datasets.distributed import split_dataset_by_node
 from RADIO.examples.common import rank_print, load_model, get_standard_transform, collate
 from RADIO.radio.input_conditioner import InputConditioner
 from .visualize_features import get_robust_pca, get_pca_map
+
+def read_frames_from_dir(dir):
+    dir = Path(dir)
+    frame_names = [name for name in sorted(os.listdir(dir)) if name[-3:].lower() in ['jpg', 'png', 'jpeg']]
+    if len(frame_names) == 0:
+        raise FileNotFoundError(f'There are no supported frames in a dir {dir!r}')
+    
+    return torch.stack([F.pil_to_tensor(Image.open(dir/name)) for name in frame_names])
+    
 
 def cat_frames(frames: torch.Tensor, direction='vertiacal'):
     '''
@@ -95,7 +105,9 @@ def main(rank: int = 0, world_size: int = 1):
                         help='Which radio model to load.'
     )
     parser.add_argument('--video', type=str, required=True,
-                        help='Path to the video')
+                        help='Path to the video. Can be a directory containing frames (in this case, set --fps key also)')
+    parser.add_argument('--fps', type=int, default=None, 
+                        help='Desired FPS rate of a video. Requred if video is a directory with frames. ')
     parser.add_argument('--output', type=str, required=True,
                         help='Where to store the output video')
     parser.add_argument('-r', '--resolution', nargs='+', type=int, default=None,
@@ -150,8 +162,13 @@ def main(rank: int = 0, world_size: int = 1):
     transform = get_standard_transform(args.resolution, args.resize_multiple, max_dim=args.max_dim,
                                        pad_mean=preprocessor.norm_mean if isinstance(preprocessor, InputConditioner) else None,)
 
-    input_video = read_video(args.video, output_format='TCHW')
-    input_frames = input_video[0]
+    if os.path.isfile(args.video):
+        input_video = read_video(args.video, output_format='TCHW')
+        input_frames = input_video[0]
+        fps = input_video[2]['video_fps']
+    elif os.path.isdir(args.video):
+        input_frames = read_frames_from_dir(args.video)
+        fps = args.fps
 
     all_features = []
     tx_frames = []
@@ -248,7 +265,7 @@ def main(rank: int = 0, world_size: int = 1):
         'preset': 'slow',  # Use a slower preset for better compression efficiency
         'profile': 'high',  # Use high profile for advanced features
     }
-    write_video(args.output, grid_frames, input_video[2]['video_fps'], video_codec=args.video_codec, options=options, **extra_args)
+    write_video(args.output, grid_frames, fps, video_codec=args.video_codec, options=options, **extra_args)
 
 
 if __name__ == '__main__':
