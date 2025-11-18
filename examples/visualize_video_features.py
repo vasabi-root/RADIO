@@ -11,7 +11,7 @@ from functools import partial
 import gc
 import math
 import os
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import random
 from tqdm import tqdm
 from typing import Any, Dict, Iterable, List, Tuple
@@ -21,15 +21,62 @@ import numpy as np
 import torch
 from torch import nn
 from torchvision.io import read_video, write_video
+import torchvision.transforms.functional as F
 
 from einops import rearrange
 
 from datasets import load_dataset_builder, load_dataset
 from datasets.distributed import split_dataset_by_node
 
-from common import rank_print, load_model, get_standard_transform, collate
-from radio.input_conditioner import InputConditioner
-from visualize_features import get_robust_pca, get_pca_map
+from RADIO.examples.common import rank_print, load_model, get_standard_transform, collate
+from RADIO.radio.input_conditioner import InputConditioner
+from .visualize_features import get_robust_pca, get_pca_map
+
+def cat_frames(frames: torch.Tensor, direction='vertiacal'):
+    '''
+    Concatenates frames by direction.  
+    `direction` can be 'vertical' or 'horizontal'.  
+    Frames are concatenated starting from the frames[0] and up/left direction
+    '''
+    # assert a.shape == b.shape
+    match direction:
+        case 'horizontal':
+            return rearrange(frames, 'n h w c -> h (n w) c').float().cpu()
+            # return torch.cat(frames, dim=1)
+        case 'vertical':
+            return rearrange(frames, 'n h w c -> (n h) w c').float().cpu()
+        case _:
+            raise Exception(f'Unsupported direction: {direction}')
+        
+def cat_frames_into_grid(frames, rows, cols):
+    assert rows*cols == len(frames)
+    
+    grid = torch.Tensor()
+    rows_list = []
+    for i in range(rows):
+        row = frames[i*cols:(i+1)*cols]
+        rows_list.append(cat_frames(row, 'horizontal'))
+    
+    return cat_frames(rows_list, 'vertical')
+
+def calc_grid(frame_shape, frame_num) -> Tuple[int]:
+    '''Returns (rows, cols)'''
+    height = frame_shape[-2]
+    width = frame_shape[-1]
+    
+    if height > width:
+        return 1, frame_num
+    
+    return frame_num // 2, 2
+
+def add_title_to_frame(frame: torch.Tensor, title: str):
+    img = F.to_pil_image(frame.permute(2, 0, 1)/255, 'RGB')
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf", 16)
+    d = ImageDraw.Draw(img)
+    height = int(frame.shape[0])
+    width = int(frame.shape[1])
+    d.text((width//2, 0), title, anchor='ma', font=font, fill='white')
+    return F.pil_to_tensor(img).permute(1, 2, 0)
 
 
 @torch.inference_mode()
@@ -44,7 +91,7 @@ def main(rank: int = 0, world_size: int = 1):
 
     device = torch.device('cuda', local_rank)
     parser = argparse.ArgumentParser(description='Visual Model Features in Video')
-    parser.add_argument('-v', '--model-version', default='radio_v2',
+    parser.add_argument('-v', '--model-version', default='c-radio_v3-h',
                         help='Which radio model to load.'
     )
     parser.add_argument('--video', type=str, required=True,
@@ -64,7 +111,7 @@ def main(rank: int = 0, world_size: int = 1):
                              ' This should be equal to the patch size of a ViT (e.g. RADIOv1)'
     )
     parser.add_argument('--vitdet-window-size', default=None, type=int, help='Enable ViTDet at the specific window size')
-    parser.add_argument('--adaptor-name', default=None, type=str, help='Generate features from a teacher adaptor')
+    parser.add_argument('--adaptor-name', default=None, type=str, help='Generate features from a teacher adaptor. If "all" output video will contain all results from all adaptors side-by-side')
     parser.add_argument('--patch-size', default=16, type=int, help='The model patch size')
     parser.add_argument('--torchhub-repo',
                         help="Path to the Torchhub repo", default="NVlabs/RADIO"
@@ -80,6 +127,11 @@ def main(rank: int = 0, world_size: int = 1):
     args, _ = parser.parse_known_args()
 
     rank_print(f'Loading model: "{args.model_version}", ViTDet: {args.vitdet_window_size}, Adaptor: "{args.adaptor_name}", Resolution: {args.resolution}, Max: {args.max_dim}...')
+    adaptor_names = [args.adaptor_name]
+    if args.adaptor_name == 'all':
+        args.side_by_side = True
+        args.adaptor_name = ['clip', 'siglip2-g', 'sam', 'dino_v2']
+        adaptor_names = ['backbone', *args.adaptor_name]
     model, preprocessor, info = load_model(args.model_version, vitdet_window_size=args.vitdet_window_size, adaptor_names=args.adaptor_name,
                                            torchhub_repo=args.torchhub_repo, force_reload=args.force_reload)
     model.to(device=device).eval()
@@ -105,6 +157,11 @@ def main(rank: int = 0, world_size: int = 1):
     tx_frames = []
 
     batch_size = args.batch_size
+    
+    rows, cols = calc_grid(input_frames[0].shape, len(adaptor_names)+1)
+    
+    features_map = {adaptor_name: [] for adaptor_name in adaptor_names}
+    
     for b in tqdm(range(0, len(input_frames), batch_size)):
         curr_frames = input_frames[b:b+batch_size]
         curr_frames = transform(curr_frames)
@@ -112,45 +169,69 @@ def main(rank: int = 0, world_size: int = 1):
         tx_frames.append(curr_frames)
 
         curr_frames = curr_frames.cuda()
+        
+        num_rows = curr_frames.shape[-2] // patch_size
+        num_cols = curr_frames.shape[-1] // patch_size
+        if b >= len(input_frames) - batch_size:
+            pass
 
         with torch.autocast(device.type, dtype=torch.bfloat16):
             p_frames = preprocessor(curr_frames)
 
             output = model(p_frames)
-            if args.adaptor_name:
-                output = output[args.adaptor_name].features
-            else:
-                output = output[1]
+            for adaptor_name in adaptor_names:
+                if adaptor_name:
+                    features = output[adaptor_name].features
+                else:
+                    features = output[1]
 
-        num_rows = curr_frames.shape[-2] // patch_size
-        num_cols = curr_frames.shape[-1] // patch_size
-
-        output = rearrange(output, 'b (h w) c -> b h w c', h=num_rows, w=num_cols).float()
-
-        all_features.append(output.cpu())
-
-    all_features = torch.cat(all_features)
+                features = rearrange(features, 'b (h w) c -> b h w c', h=num_rows, w=num_cols).float().cpu()
+                features_map[adaptor_name].append(features)
+            
     tx_frames = torch.cat(tx_frames)
+    
+    colored_frames = []
+    if args.side_by_side:
+        original_frames = []
+        for frame in tx_frames.permute(0, 2, 3, 1) * 255:
+            original_frames.append(add_title_to_frame(frame, 'original'))
+        colored_frames.append(torch.stack(original_frames))
+        
+    for adaptor_name, all_features in features_map.items():
+        all_features = torch.cat(all_features)
+        
+        num_keyframes = 30
+        kf_stride = max(all_features.shape[0] // num_keyframes, 1)
 
-    num_keyframes = 30
-    kf_stride = max(all_features.shape[0] // num_keyframes, 1)
+        # We'll use this to compute the PCA
+        sub_features = all_features[::kf_stride]
+        pca_stats = get_robust_pca(sub_features.flatten(0, 2))
 
-    # We'll use this to compute the PCA
-    sub_features = all_features[::kf_stride]
-    pca_stats = get_robust_pca(sub_features.flatten(0, 2))
+        output_frames = []
+        for raw_frame, features in zip(tx_frames, all_features):
+            pca_features = torch.from_numpy(get_pca_map(features, raw_frame.shape[-2:], pca_stats=pca_stats, interpolation='bilinear'))
+            pca_features = pca_features.mul_(255).byte()
+            titled = add_title_to_frame(pca_features, adaptor_name)
+            output_frames.append(titled)
 
-    output_frames = []
-    for raw_frame, features in zip(tx_frames, all_features):
-        pca_features = torch.from_numpy(get_pca_map(features, raw_frame.shape[-2:], pca_stats=pca_stats, interpolation='bilinear'))
-
-        if args.side_by_side:
-            raw_frame = raw_frame.permute(1, 2, 0).cpu()
-            pca_features = torch.cat((raw_frame, pca_features), dim=1)
-
-        pca_features = pca_features.mul_(255).byte()
-        output_frames.append(pca_features)
-
-    output_frames = torch.stack(output_frames)
+        output_frames = torch.stack(output_frames)
+        colored_frames.append(output_frames)
+    
+    del features_map
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    colored_frames = torch.stack(colored_frames, dim=1)
+    grid_frames = []
+    for frames in colored_frames:
+        grid_frames.append(cat_frames_into_grid(frames, rows, cols))
+    
+    del colored_frames
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    grid_frames = torch.stack(grid_frames, dim=0)
+    
     extra_args = dict()
     if args.audio:
         extra_args.update(dict(
@@ -167,7 +248,7 @@ def main(rank: int = 0, world_size: int = 1):
         'preset': 'slow',  # Use a slower preset for better compression efficiency
         'profile': 'high',  # Use high profile for advanced features
     }
-    write_video(args.output, output_frames, input_video[2]['video_fps'], video_codec=args.video_codec, options=options, **extra_args)
+    write_video(args.output, grid_frames, input_video[2]['video_fps'], video_codec=args.video_codec, options=options, **extra_args)
 
 
 if __name__ == '__main__':
